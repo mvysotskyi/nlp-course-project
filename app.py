@@ -36,9 +36,9 @@ def read_text_file(path: Path) -> Tuple[str, str]:
     """Read UTF-8-ish text files with graceful fallback."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        return text, f"text extracted ({readable_size(path)})"
+        return text, f"текст витягнуто ({readable_size(path)})"
     except Exception as exc:
-        return "", f"unable to read text file: {exc}"
+        return "", f"не вдалося прочитати текстовий файл: {exc}"
 
 
 def read_pdf(path: Path) -> Tuple[str, str]:
@@ -47,17 +47,19 @@ def read_pdf(path: Path) -> Tuple[str, str]:
         from pypdf import PdfReader
     except ImportError:
         return "", (
-            f"PDF uploaded ({readable_size(path)}); install 'pypdf' to auto-extract text."
+            f"PDF завантажено ({readable_size(path)}); встановіть 'pypdf', щоб автоматично витягувати текст."
         )
 
     try:
         reader = PdfReader(str(path))
         pages = [page.extract_text() or "" for page in reader.pages]
         text = "\n".join(pages).strip()
-        pages_info = f"{len(reader.pages)} page{'s' if len(reader.pages) != 1 else ''}"
-        return text, f"text extracted from PDF ({pages_info}, {readable_size(path)})"
+        page_count = len(reader.pages)
+        pages_word = "сторінка" if page_count == 1 else "сторінок" if page_count >= 5 else "сторінки"
+        pages_info = f"{page_count} {pages_word}"
+        return text, f"текст витягнуто з PDF ({pages_info}, {readable_size(path)})"
     except Exception as exc:
-        return "", f"failed to parse PDF: {exc}"
+        return "", f"не вдалося обробити PDF: {exc}"
 
 
 def read_docx(path: Path) -> Tuple[str, str]:
@@ -66,15 +68,15 @@ def read_docx(path: Path) -> Tuple[str, str]:
         import docx  # type: ignore
     except ImportError:
         return "", (
-            f"DOCX uploaded ({readable_size(path)}); install 'python-docx' to auto-extract text."
+            f"DOCX завантажено ({readable_size(path)}); встановіть 'python-docx', щоб автоматично витягувати текст."
         )
 
     try:
         document = docx.Document(str(path))
         text = "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
-        return text, f"text extracted from DOCX ({readable_size(path)})"
+        return text, f"текст витягнуто з DOCX ({readable_size(path)})"
     except Exception as exc:
-        return "", f"failed to parse DOCX: {exc}"
+        return "", f"не вдалося обробити DOCX: {exc}"
 
 
 def extract_file_context(path: Path) -> Tuple[str, str]:
@@ -88,20 +90,20 @@ def extract_file_context(path: Path) -> Tuple[str, str]:
         return read_docx(path)
     if suffix in IMAGE_EXTENSIONS:
         return "", (
-            f"image uploaded ({readable_size(path)}); add a prompt describing its contents."
+            f"зображення завантажено ({readable_size(path)}); додайте підказку з описом його вмісту."
         )
-    return "", f"{suffix or 'file'} uploaded ({readable_size(path)}); extraction not supported."
+    return "", f"{suffix or 'файл'} завантажено ({readable_size(path)}); витягнення не підтримується."
 
 
 def summarize_context(sections: List[str], summaries: List[str]) -> Tuple[str, str]:
     """Combine extracted text and create a Markdown-friendly summary."""
     combined_context = "\n\n".join(sections).strip()
     if len(combined_context) > MAX_CONTEXT_CHARS:
-        combined_context = combined_context[:MAX_CONTEXT_CHARS] + "\n...[context truncated]"
+        combined_context = combined_context[:MAX_CONTEXT_CHARS] + "\n...[контекст урізано]"
 
     summary_lines = "\n".join(f"- {line}" for line in summaries)
     context_md = (
-        "### Loaded Context\n" + summary_lines if summary_lines else "No context loaded yet."
+        "### Завантажений контекст\n" + summary_lines if summary_lines else "Контекст ще не завантажено."
     )
     return combined_context, context_md
 
@@ -113,7 +115,7 @@ def process_files(
     state = state or {"context": "", "history": [], "files": []}
     if not uploaded_files:
         state.update({"context": "", "files": []})
-        return state, "No context loaded yet.", "Context cleared."
+        return state, "Контекст ще не завантажено.", "Контекст очищено."
 
     extracted_sections: List[str] = []
     summary_lines: List[str] = []
@@ -123,17 +125,17 @@ def process_files(
         if text:
             snippet = text[:MAX_PER_FILE_CHARS]
             if len(text) > MAX_PER_FILE_CHARS:
-                snippet += "\n...[truncated]"
-            extracted_sections.append(f"Source: {path.name}\n{snippet}")
+                snippet += "\n...[урізано]"
+            extracted_sections.append(f"Джерело: {path.name}\n{snippet}")
         summary_lines.append(f"**{path.name}** — {summary}")
 
     combined_context, context_md = summarize_context(extracted_sections, summary_lines)
     state.update(
         {"context": combined_context, "files": [Path(p).name for p in uploaded_files]}
     )
-    status = (
-        f"Loaded {len(uploaded_files)} file{'s' if len(uploaded_files) != 1 else ''}."
-    )
+    file_count = len(uploaded_files)
+    file_word = "файл" if file_count == 1 else "файли" if 2 <= file_count <= 4 else "файлів"
+    status = f"Завантажено {file_count} {file_word}."
     return state, context_md, status
 
 
@@ -189,7 +191,7 @@ def generate_response(
     """Send the user's prompt to the LLM and return the updated conversation."""
     user_message = (user_message or "").strip()
     if not user_message:
-        return chat_history, state or {}, gr.update(value=user_message), "Please enter a question."
+        return chat_history, state or {}, gr.update(value=user_message), "Введіть запитання."
 
     chat_history = chat_history or []
     state = state or {"context": "", "history": [], "files": []}
@@ -200,20 +202,20 @@ def generate_response(
         messages = build_messages(state, user_message)
         assistant_response = fetch_completion(messages)
     except Exception as exc:  # pragma: no cover - network failure path
-        chat_history[-1] = (user_message, "⚠️ Unable to reach the language model.")
-        return chat_history, state, gr.update(value=user_message), f"Model call failed: {exc}"
+        chat_history[-1] = (user_message, "⚠️ Не вдалося підключитися до мовної моделі.")
+        return chat_history, state, gr.update(value=user_message), f"Помилка виклику моделі: {exc}"
 
     chat_history[-1] = (user_message, assistant_response)
     state_history = state.get("history", [])
     state_history.append((user_message, assistant_response))
     state["history"] = state_history
-    return chat_history, state, gr.update(value=""), "Response generated."
+    return chat_history, state, gr.update(value=""), "Відповідь згенеровано."
 
 
 def clear_conversation(state: Optional[dict]) -> Tuple[List[Tuple[str, str]], dict, Any, str, str]:
     """Reset conversation history and uploaded context."""
     cleared_state = {"context": "", "history": [], "files": []}
-    return [], cleared_state, gr.update(value=""), "Conversation cleared.", "No context loaded yet."
+    return [], cleared_state, gr.update(value=""), "Розмову очищено.", "Контекст ще не завантажено."
 
 
 def build_interface() -> gr.Blocks:
@@ -229,11 +231,11 @@ def build_interface() -> gr.Blocks:
     }
     """ 
 
-    with gr.Blocks(title="Legal Helper", css=layout_css, elem_id="legal-helper") as demo:
+    with gr.Blocks(title="Юридичний помічник", css=layout_css, elem_id="legal-helper") as demo:
         gr.Markdown(
-            "# Legal Helper\n"
-            "Upload supporting materials and chat with an AI legal research assistant.\n"
-            "The assistant provides informational guidance only and is not a substitute for a lawyer."
+            "# Юридичний помічник\n"
+            "Завантажте допоміжні матеріали й спілкуйтеся з AI-асистентом для юридичних досліджень.\n"
+            "Асистент надає лише інформаційні рекомендації й не замінює адвоката."
         )
 
         state = gr.State({"context": "", "history": [], "files": []})
@@ -241,23 +243,23 @@ def build_interface() -> gr.Blocks:
         with gr.Row():
             with gr.Column(scale=1):
                 file_input = gr.File(
-                    label="Upload documents, photos, or scans",
+                    label="Завантажте документи, фото або скани",
                     file_count="multiple",
                     type="filepath",
                 )
             with gr.Column(scale=1):
-                context_display = gr.Markdown("No context loaded yet.")
+                context_display = gr.Markdown("Контекст ще не завантажено.")
 
-        chatbot = gr.Chatbot(label="Legal Helper Conversation", height=560)
+        chatbot = gr.Chatbot(label="Розмова з Юридичним помічником", height=560)
         prompt = gr.Textbox(
-            label="Ask a legal question (informational guidance only)",
-            placeholder="Describe your situation or question...",
+            label="Поставте юридичне запитання (лише інформаційні поради)",
+            placeholder="Опишіть свою ситуацію або запитання...",
             lines=3,
         )
 
         with gr.Row():
-            send_button = gr.Button("Send", variant="primary")
-            clear_button = gr.Button("Clear Conversation")
+            send_button = gr.Button("Надіслати", variant="primary")
+            clear_button = gr.Button("Очистити розмову")
 
         status = gr.Markdown("")
 
