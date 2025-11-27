@@ -13,6 +13,7 @@ MAX_CONTEXT_CHARS = 12000
 MAX_PER_FILE_CHARS = 4000
 TEXT_EXTENSIONS = {".txt", ".md"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}
+OCR_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
 
 
 def readable_size(path: Path) -> str:
@@ -79,6 +80,15 @@ def read_docx(path: Path) -> Tuple[str, str]:
         return "", f"не вдалося обробити DOCX: {exc}"
 
 
+def placeholder_ocr(path: Path) -> str:
+    """Return a deterministic placeholder for OCR output."""
+    suffix = path.suffix.lower() or "файл"
+    return (
+        f"[OCR демо] Розпізнаний текст з {path.name} ({suffix}). "
+        "Тут буде результат від реального OCR-сервісу."
+    )
+
+
 def extract_file_context(path: Path) -> Tuple[str, str]:
     """Return extracted text (if any) and a human-friendly summary."""
     suffix = path.suffix.lower()
@@ -95,16 +105,29 @@ def extract_file_context(path: Path) -> Tuple[str, str]:
     return "", f"{suffix or 'файл'} завантажено ({readable_size(path)}); витягнення не підтримується."
 
 
-def summarize_context(sections: List[str], summaries: List[str]) -> Tuple[str, str]:
+def merge_contexts(state: dict) -> str:
+    """Combine file and OCR contexts into a single string."""
+    parts = [state.get("base_context", ""), state.get("ocr_context", "")]
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+def compose_context_display(state: dict) -> str:
+    """Render a combined Markdown summary for all context sources."""
+    sections = [state.get("file_summary_md", ""), state.get("ocr_summary_md", "")]
+    sections = [s for s in sections if s and s.strip()]
+    return "\n\n".join(sections) if sections else "Контекст ще не завантажено."
+
+
+def summarize_context(
+    sections: List[str], summaries: List[str], title: str = "### Завантажений контекст"
+) -> Tuple[str, str]:
     """Combine extracted text and create a Markdown-friendly summary."""
     combined_context = "\n\n".join(sections).strip()
     if len(combined_context) > MAX_CONTEXT_CHARS:
         combined_context = combined_context[:MAX_CONTEXT_CHARS] + "\n...[контекст урізано]"
 
     summary_lines = "\n".join(f"- {line}" for line in summaries)
-    context_md = (
-        "### Завантажений контекст\n" + summary_lines if summary_lines else "Контекст ще не завантажено."
-    )
+    context_md = f"{title}\n{summary_lines}" if summary_lines else "Контекст ще не завантажено."
     return combined_context, context_md
 
 
@@ -112,10 +135,12 @@ def process_files(
     uploaded_files: Optional[List[str]], state: Optional[dict]
 ) -> Tuple[dict, str, str]:
     """Handle file uploads, extract available text, and update session state."""
-    state = state or {"context": "", "history": [], "files": []}
+    state = state or {"context": "", "history": [], "files": [], "ocr_files": []}
     if not uploaded_files:
-        state.update({"context": "", "files": []})
-        return state, "Контекст ще не завантажено.", "Контекст очищено."
+        state.update({"context": "", "files": [], "base_context": "", "file_summary_md": ""})
+        state["context"] = merge_contexts(state)
+        context_md = compose_context_display(state)
+        return state, context_md, "Контекст очищено."
 
     extracted_sections: List[str] = []
     summary_lines: List[str] = []
@@ -129,14 +154,75 @@ def process_files(
             extracted_sections.append(f"Джерело: {path.name}\n{snippet}")
         summary_lines.append(f"**{path.name}** — {summary}")
 
-    combined_context, context_md = summarize_context(extracted_sections, summary_lines)
+    combined_context, context_md = summarize_context(
+        extracted_sections, summary_lines, title="### OCR контекст"
+    )
     state.update(
-        {"context": combined_context, "files": [Path(p).name for p in uploaded_files]}
+        {
+            "base_context": combined_context,
+            "context": merge_contexts(state),
+            "files": [Path(p).name for p in uploaded_files],
+            "file_summary_md": context_md,
+        }
     )
     file_count = len(uploaded_files)
     file_word = "файл" if file_count == 1 else "файли" if 2 <= file_count <= 4 else "файлів"
     status = f"Завантажено {file_count} {file_word}."
-    return state, context_md, status
+    combined_display = compose_context_display(state)
+    return state, combined_display, status
+
+
+def process_ocr_files(
+    uploaded_files: Optional[List[str]], state: Optional[dict]
+) -> Tuple[dict, str, str, str]:
+    """Simulate OCR text extraction and add it to the shared context."""
+    state = state or {
+        "context": "",
+        "history": [],
+        "files": [],
+        "ocr_files": [],
+        "base_context": "",
+    }
+
+    if not uploaded_files:
+        state.update({"ocr_context": "", "ocr_files": [], "ocr_summary_md": ""})
+        state["context"] = merge_contexts(state)
+        context_md = compose_context_display(state)
+        return state, context_md, "OCR контекст очищено.", ""
+
+    extracted_sections: List[str] = []
+    summary_lines: List[str] = []
+    processed_files = 0
+
+    for file_path in uploaded_files:
+        path = Path(file_path)
+        suffix = path.suffix.lower()
+        if suffix not in OCR_EXTENSIONS:
+            summary_lines.append(f"**{path.name}** — формат не підтримується для OCR.")
+            continue
+
+        text = placeholder_ocr(path)
+        extracted_sections.append(f"Джерело: {path.name}\n{text}")
+        summary_lines.append(f"**{path.name}** — OCR чернетка ({readable_size(path)})")
+        processed_files += 1
+
+    combined_context, context_md = summarize_context(extracted_sections, summary_lines)
+    state.update(
+        {
+            "ocr_context": combined_context,
+            "ocr_files": [Path(p).name for p in uploaded_files],
+            "ocr_summary_md": context_md,
+            "context": merge_contexts(state),
+        }
+    )
+
+    status = (
+        f"OCR підготовлено для {processed_files} файл(ів)."
+        if processed_files
+        else "Файли для OCR не оброблено."
+    )
+    combined_display = compose_context_display(state)
+    return state, combined_display, status, combined_context
 
 
 def build_messages(state: dict, user_message: str) -> List[dict]:
@@ -194,7 +280,13 @@ def generate_response(
         return chat_history, state or {}, gr.update(value=user_message), "Введіть запитання."
 
     chat_history = chat_history or []
-    state = state or {"context": "", "history": [], "files": []}
+    state = state or {
+        "context": "",
+        "history": [],
+        "files": [],
+        "ocr_files": [],
+        "base_context": "",
+    }
 
     chat_history.append((user_message, ""))
 
@@ -214,7 +306,16 @@ def generate_response(
 
 def clear_conversation(state: Optional[dict]) -> Tuple[List[Tuple[str, str]], dict, Any, str, str]:
     """Reset conversation history and uploaded context."""
-    cleared_state = {"context": "", "history": [], "files": []}
+    cleared_state = {
+        "context": "",
+        "history": [],
+        "files": [],
+        "ocr_files": [],
+        "ocr_context": "",
+        "base_context": "",
+        "file_summary_md": "",
+        "ocr_summary_md": "",
+    }
     return [], cleared_state, gr.update(value=""), "Розмову очищено.", "Контекст ще не завантажено."
 
 
@@ -238,7 +339,18 @@ def build_interface() -> gr.Blocks:
             "Асистент надає лише інформаційні рекомендації й не замінює адвоката."
         )
 
-        state = gr.State({"context": "", "history": [], "files": []})
+        state = gr.State(
+            {
+                "context": "",
+                "history": [],
+                "files": [],
+                "ocr_files": [],
+                "ocr_context": "",
+                "base_context": "",
+                "file_summary_md": "",
+                "ocr_summary_md": "",
+            }
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -249,6 +361,24 @@ def build_interface() -> gr.Blocks:
                 )
             with gr.Column(scale=1):
                 context_display = gr.Markdown("Контекст ще не завантажено.")
+
+        with gr.Accordion("OCR з PDF та зображень", open=False):
+            ocr_files = gr.File(
+                label="Додайте файли для OCR (PDF або зображення)",
+                file_count="multiple",
+                type="filepath",
+                file_types=[".pdf", "image"],
+            )
+            ocr_preview = gr.Textbox(
+                label="Чернетка тексту після OCR",
+                lines=6,
+                placeholder="Тут з'явиться розпізнаний текст для використання в чаті.",
+            )
+            ocr_help = gr.Markdown(
+                "Цей OCR блок поки що використовує демо-функцію. "
+                "Після інтеграції з реальним сервісом тут відобразиться розпізнаний текст."
+            )
+            ocr_button = gr.Button("Запустити OCR (демо)")
 
         chatbot = gr.Chatbot(label="Розмова з Юридичним помічником", height=560)
         prompt = gr.Textbox(
@@ -267,6 +397,12 @@ def build_interface() -> gr.Blocks:
             fn=process_files,
             inputs=[file_input, state],
             outputs=[state, context_display, status],
+        )
+
+        ocr_button.click(
+            fn=process_ocr_files,
+            inputs=[ocr_files, state],
+            outputs=[state, context_display, status, ocr_preview],
         )
 
         send_button.click(
