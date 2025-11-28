@@ -1,12 +1,17 @@
+import re
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-import gradio as gr
+import streamlit as st
+import markdown as md 
 from openai import OpenAI
 
-# Default configuration values can be overridden with environment variables.
+# =========================
+# Configuration constants
+# =========================
+
 DEFAULT_BASE_URL = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
 DEFAULT_MODEL = "openai.gpt-oss-120b-1:0"
 MAX_CONTEXT_CHARS = 12000
@@ -15,6 +20,12 @@ TEXT_EXTENSIONS = {".txt", ".md"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}
 OCR_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
 
+UPLOAD_ROOT = Path("uploads")
+
+
+# =========================
+# Backend helpers (unchanged logic)
+# =========================
 
 def readable_size(path: Path) -> str:
     size_kb = path.stat().st_size / 1024
@@ -268,45 +279,20 @@ def fetch_completion(messages: List[dict]) -> str:
     )
     message = completion.choices[0].message
     content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
-    return (content or "").strip()
+    content = (content or "").strip()
+
+    content = re.sub(
+        r"<reasoning>.*?</reasoning>",
+        "",
+        content,
+        flags=re.DOTALL
+    ).strip()
+
+    return content
 
 
-def generate_response(
-    user_message: str, chat_history: List[Tuple[str, str]], state: Optional[dict]
-) -> Tuple[List[Tuple[str, str]], dict, Any, str]:
-    """Send the user's prompt to the LLM and return the updated conversation."""
-    user_message = (user_message or "").strip()
-    if not user_message:
-        return chat_history, state or {}, gr.update(value=user_message), "Введіть запитання."
-
-    chat_history = chat_history or []
-    state = state or {
-        "context": "",
-        "history": [],
-        "files": [],
-        "ocr_files": [],
-        "base_context": "",
-    }
-
-    chat_history.append((user_message, ""))
-
-    try:
-        messages = build_messages(state, user_message)
-        assistant_response = fetch_completion(messages)
-    except Exception as exc:  # pragma: no cover - network failure path
-        chat_history[-1] = (user_message, "⚠️ Не вдалося підключитися до мовної моделі.")
-        return chat_history, state, gr.update(value=user_message), f"Помилка виклику моделі: {exc}"
-
-    chat_history[-1] = (user_message, assistant_response)
-    state_history = state.get("history", [])
-    state_history.append((user_message, assistant_response))
-    state["history"] = state_history
-    return chat_history, state, gr.update(value=""), "Відповідь згенеровано."
-
-
-def clear_conversation(state: Optional[dict]) -> Tuple[List[Tuple[str, str]], dict, Any, str, str]:
-    """Reset conversation history and uploaded context."""
-    cleared_state = {
+def initial_state() -> dict:
+    return {
         "context": "",
         "history": [],
         "files": [],
@@ -316,116 +302,282 @@ def clear_conversation(state: Optional[dict]) -> Tuple[List[Tuple[str, str]], di
         "file_summary_md": "",
         "ocr_summary_md": "",
     }
-    return [], cleared_state, gr.update(value=""), "Розмову очищено.", "Контекст ще не завантажено."
 
 
-def build_interface() -> gr.Blocks:
-    """Create the Gradio UI for the Legal Helper app."""
-    layout_css = """
-    #legal-helper {
-        max-width: 800px;      /* was 600px */
-        margin: 0 auto;
-    }
+def generate_response(user_message: str, state: Optional[dict]) -> Tuple[dict, str]:
+    """Send the user's prompt to the LLM and return the updated conversation state + status."""
+    user_message = (user_message or "").strip()
+    if not user_message:
+        return state or initial_state(), "Введіть запитання."
 
-    .gr-chatbot {
-        height: 800px !important;  /* increased chat height */
-    }
-    """ 
+    state = state or initial_state()
+    state_history = state.get("history", [])
+    state_history.append((user_message, ""))  # placeholder for assistant
 
-    with gr.Blocks(title="Юридичний помічник", css=layout_css, elem_id="legal-helper") as demo:
-        gr.Markdown(
-            "# Юридичний помічник\n"
-            "Завантажте допоміжні матеріали й спілкуйтеся з AI-асистентом для юридичних досліджень.\n"
-            "Асистент надає лише інформаційні рекомендації й не замінює адвоката."
+    try:
+        messages = build_messages(state, user_message)
+        assistant_response = fetch_completion(messages)
+    except Exception as exc:  # pragma: no cover - network failure path
+        state_history[-1] = (user_message, "⚠️ Не вдалося підключитися до мовної моделі.")
+        state["history"] = state_history
+        return state, f"Помилка виклику моделі: {exc}"
+
+    state_history[-1] = (user_message, assistant_response)
+    state["history"] = state_history
+    return state, "Відповідь згенеровано."
+
+
+def clear_conversation() -> Tuple[dict, str, str]:
+    """Reset conversation history and uploaded context."""
+    cleared_state = initial_state()
+    return cleared_state, "Розмову очищено.", "Контекст ще не завантажено."
+
+
+# =========================
+# Streamlit UI
+# =========================
+
+def save_uploaded_files(uploaded_files: List[Any], subdir: str) -> List[str]:
+    """
+    Save Streamlit UploadedFile objects to disk and return a list of file paths.
+    subdir: 'base' or 'ocr' just to separate folders.
+    """
+    if not uploaded_files:
+        return []
+
+    target_dir = UPLOAD_ROOT / subdir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: List[str] = []
+    for f in uploaded_files:
+        # f is a streamlit.runtime.uploaded_file_manager.UploadedFile
+        path = target_dir / f.name
+        # Overwrite if exists (fine for this use case)
+        path.write_bytes(f.read())
+        saved_paths.append(str(path))
+    return saved_paths
+
+
+from typing import Optional  # if not already imported at top
+
+
+def build_chat_html(
+    history_pairs: List[Tuple[str, Optional[str]]],
+    chat_height: int = 600,
+) -> str:
+    """
+    Build full HTML (outer scrollable div + message bubbles) from
+    a list of (user_text, assistant_text_or_None) pairs.
+    Renders Markdown inside the bubbles and aligns user right / assistant left.
+    """
+    chat_history_html = ""
+
+    for user_text, assistant_text in history_pairs:
+        # Markdown → HTML (no escaping so formatting works)
+        u_html = md.markdown(user_text or "") if user_text else ""
+        a_html = md.markdown(assistant_text or "") if assistant_text else ""
+
+        if user_text:
+            # USER bubble – right-aligned
+            chat_history_html += (
+                '<div style="display:flex; justify-content:flex-end; '
+                'margin-bottom:0.75rem;">'
+                '  <div style="max-width:85%; text-align:left;">'
+                '    <div style="font-size:0.8rem; color:#bbbbbb; text-align:right; '
+                '                margin-bottom:0.15rem;">'
+                '      🧑‍💼 Користувач:'
+                '    </div>'
+                '    <div style="padding:0.45rem 0.7rem; border-radius:12px; '
+                '                border-bottom-right-radius:0; '
+                '                background-color:#262730;">'
+                f'      {u_html}'
+                '    </div>'
+                '  </div>'
+                '</div>'
+            )
+
+        if assistant_text:
+            # ASSISTANT bubble – left-aligned
+            chat_history_html += (
+                '<div style="display:flex; justify-content:flex-start; '
+                'margin-bottom:0.75rem;">'
+                '  <div style="max-width:85%; text-align:left;">'
+                '    <div style="font-size:0.8rem; color:#bbbbbb; margin-bottom:0.15rem;">'
+                '      🤖 Помічник:'
+                '    </div>'
+                '    <div style="padding:0.45rem 0.7rem; border-radius:12px; '
+                '                border-bottom-left-radius:0; '
+                '                background-color:#1e3a5f;">'
+                f'      {a_html}'
+                '    </div>'
+                '  </div>'
+                '</div>'
+            )
+
+    if not chat_history_html:
+        inner = "<span style='color:#888;'>Ще немає повідомлень.</span>"
+    else:
+        inner = chat_history_html
+
+    outer_html = (
+        f'<div style="height:{chat_height}px; overflow-y:auto; '
+        'padding:0.75rem 0.5rem; border:1px solid #444; '
+        'border-radius:8px; background-color:#0e1117;">'
+        f'{inner}'
+        '</div>'
+    )
+    return outer_html
+
+
+
+def main():
+    st.set_page_config(page_title="Юридичний помічник", layout="wide")
+
+    # Session state bootstrapping
+    if "app_state" not in st.session_state:
+        st.session_state.app_state = initial_state()
+    if "status_msg" not in st.session_state:
+        st.session_state.status_msg = ""
+    if "context_display" not in st.session_state:
+        st.session_state.context_display = "Контекст ще не завантажено."
+    if "ocr_preview_text" not in st.session_state:
+        st.session_state.ocr_preview_text = ""
+
+    # Layout: sidebar for files / OCR, main area for context + chat
+    with st.sidebar:
+        st.header("Документи")
+
+        base_files = st.file_uploader(
+            "Завантажте документи, фото або скани",
+            accept_multiple_files=True,
+            help="Підтримуються TXT, MD, PDF, DOCX, зображення.",
         )
 
-        state = gr.State(
-            {
-                "context": "",
-                "history": [],
-                "files": [],
-                "ocr_files": [],
-                "ocr_context": "",
-                "base_context": "",
-                "file_summary_md": "",
-                "ocr_summary_md": "",
-            }
+        if st.button("Оновити контекст з файлів"):
+            if base_files:
+                file_paths = save_uploaded_files(base_files, subdir="base")
+                state, ctx_display, status = process_files(file_paths, st.session_state.app_state)
+            else:
+                state, ctx_display, status = process_files([], st.session_state.app_state)
+            st.session_state.app_state = state
+            st.session_state.context_display = ctx_display
+            st.session_state.status_msg = status
+
+        st.markdown("---")
+        st.subheader("OCR з PDF та зображень")
+
+        ocr_files = st.file_uploader(
+            "Додайте файли для OCR (PDF або зображення)",
+            accept_multiple_files=True,
+            type=["pdf", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif"],
         )
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                file_input = gr.File(
-                    label="Завантажте документи, фото або скани",
-                    file_count="multiple",
-                    type="filepath",
+        if st.button("Запустити OCR (демо)"):
+            if ocr_files:
+                ocr_paths = save_uploaded_files(ocr_files, subdir="ocr")
+                state, ctx_display, status, ocr_text = process_ocr_files(
+                    ocr_paths, st.session_state.app_state
                 )
-            with gr.Column(scale=1):
-                context_display = gr.Markdown("Контекст ще не завантажено.")
+            else:
+                state, ctx_display, status, ocr_text = process_ocr_files(
+                    [], st.session_state.app_state
+                )
 
-        with gr.Accordion("OCR з PDF та зображень", open=False):
-            ocr_files = gr.File(
-                label="Додайте файли для OCR (PDF або зображення)",
-                file_count="multiple",
-                type="filepath",
-                file_types=[".pdf", "image"],
-            )
-            ocr_preview = gr.Textbox(
-                label="Чернетка тексту після OCR",
-                lines=6,
-                placeholder="Тут з'явиться розпізнаний текст для використання в чаті.",
-            )
-            ocr_help = gr.Markdown(
-                "Цей OCR блок поки що використовує демо-функцію. "
-                "Після інтеграції з реальним сервісом тут відобразиться розпізнаний текст."
-            )
-            ocr_button = gr.Button("Запустити OCR (демо)")
+            st.session_state.app_state = state
+            st.session_state.context_display = ctx_display
+            st.session_state.status_msg = status
+            st.session_state.ocr_preview_text = ocr_text
 
-        chatbot = gr.Chatbot(label="Розмова з Юридичним помічником", height=560)
-        prompt = gr.Textbox(
-            label="Поставте юридичне запитання (лише інформаційні поради)",
-            placeholder="Опишіть свою ситуацію або запитання...",
-            lines=3,
+        st.markdown(
+            "_Цей OCR блок поки що використовує демо-функцію. Після інтеграції з реальним сервісом тут "
+            "відобразиться розпізнаний текст._"
         )
 
-        with gr.Row():
-            send_button = gr.Button("Надіслати", variant="primary")
-            clear_button = gr.Button("Очистити розмову")
+    # Main columns: left → context, right → chat
+    col_ctx, col_chat = st.columns([1, 2])
 
-        status = gr.Markdown("")
-
-        file_input.upload(
-            fn=process_files,
-            inputs=[file_input, state],
-            outputs=[state, context_display, status],
+    with col_ctx:
+        st.title("Юридичний помічник")
+        st.markdown(
+            "Завантажте допоміжні матеріали й спілкуйтеся з AI-асистентом для юридичних досліджень.\n\n"
+            "**Увага:** асистент надає лише інформаційні рекомендації й **не замінює адвоката**."
         )
 
-        ocr_button.click(
-            fn=process_ocr_files,
-            inputs=[ocr_files, state],
-            outputs=[state, context_display, status, ocr_preview],
+        st.subheader("Поточний контекст")
+        st.markdown(st.session_state.context_display)
+
+        st.subheader("Чернетка тексту після OCR")
+        st.text_area(
+            "OCR текст",
+            value=st.session_state.ocr_preview_text,
+            height=200,
+            key="ocr_preview_text_box",
         )
 
-        send_button.click(
-            fn=generate_response,
-            inputs=[prompt, chatbot, state],
-            outputs=[chatbot, state, prompt, status],
-        )
+    with col_chat:
+        st.subheader("Розмова з Юридичним помічником")
 
-        prompt.submit(
-            fn=generate_response,
-            inputs=[prompt, chatbot, state],
-            outputs=[chatbot, state, prompt, status],
-        )
+        # Clear conversation button
+        if st.button("Очистити розмову"):
+            new_state, status, ctx_display = clear_conversation()
+            st.session_state.app_state = new_state
+            st.session_state.status_msg = status
+            st.session_state.context_display = ctx_display
+            st.session_state.ocr_preview_text = ""
+            st.rerun()
 
-        clear_button.click(
-            fn=clear_conversation,
-            inputs=[state],
-            outputs=[chatbot, state, prompt, status, context_display],
-        )
+        # Container where chat will be rendered (scrollable box)
+        chat_container = st.container()
 
-    return demo
+        # Chat input – visually appears BELOW the container
+        user_message = st.chat_input("Опишіть свою ситуацію або запитання...")
+
+        with chat_container:
+            chat_height = 600  # adjust if you want
+
+            # Current history from state
+            history = st.session_state.app_state.get("history", [])
+
+            # Placeholder we can update twice: (1) pending view, (2) final view
+            chat_placeholder = st.empty()
+
+            # ---------- 1) Show pending bubble immediately ----------
+
+            if user_message:
+                # History + new user message, assistant not yet answered
+                pending_pairs: List[Tuple[str, Optional[str]]] = history + [
+                    (user_message, None)
+                ]
+                pending_html = build_chat_html(pending_pairs, chat_height=chat_height)
+                chat_placeholder.markdown(pending_html, unsafe_allow_html=True)
+            else:
+                # No new message → just render normal history
+                current_html = build_chat_html(
+                    [(u, a) for (u, a) in history], chat_height=chat_height
+                )
+                chat_placeholder.markdown(current_html, unsafe_allow_html=True)
+
+            # ---------- 2) If there is a new message, call LLM and update chat ----------
+
+            if user_message:
+                # Call your existing backend logic to get a response
+                state, status = generate_response(user_message, st.session_state.app_state)
+                st.session_state.app_state = state
+                st.session_state.status_msg = status
+
+                # Now render final history including assistant reply
+                final_history = st.session_state.app_state.get("history", [])
+                final_html = build_chat_html(
+                    [(u, a) for (u, a) in final_history], chat_height=chat_height
+                )
+                chat_placeholder.markdown(final_html, unsafe_allow_html=True)
 
 
-if __name__ == "__main__":  # pragma: no cover - Gradio launch path
-    demo = build_interface()
-    demo.launch(server_name="0.0.0.0")
+
+    # Status line at the bottom
+    if st.session_state.status_msg:
+        st.info(st.session_state.status_msg)
+
+
+if __name__ == "__main__":
+    main()
