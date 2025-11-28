@@ -1,7 +1,3 @@
-fastapi
-uvicorn[standard]
-Pillow
-numpy
-torch          # your chosen version (CPU or CUDA)
-transformers>=4.52.0
-accelerate>=0.34.0
+boto3
+pillow
+pytesseract
