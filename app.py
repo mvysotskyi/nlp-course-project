@@ -1,5 +1,7 @@
 import re
 import os
+import uuid
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -7,6 +9,8 @@ from typing import Any, List, Optional, Tuple
 import streamlit as st
 import markdown as md 
 from openai import OpenAI
+
+import boto3
 
 # =========================
 # Configuration constants
@@ -21,6 +25,8 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}
 OCR_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
 
 UPLOAD_ROOT = Path("uploads")
+UPLOAD_S3_BUCKET = os.getenv("UPLOAD_S3_BUCKET", "legal-ocr-input")
+DOWNLOAD_S3_BUCKET = os.getenv("DOWNLOAD_S3_BUCKET", "legal-ocr-output")
 
 
 # =========================
@@ -92,12 +98,36 @@ def read_docx(path: Path) -> Tuple[str, str]:
 
 
 def placeholder_ocr(path: Path) -> str:
-    """Return a deterministic placeholder for OCR output."""
-    suffix = path.suffix.lower() or "файл"
-    return (
-        f"[OCR демо] Розпізнаний текст з {path.name} ({suffix}). "
-        "Тут буде результат від реального OCR-сервісу."
-    )
+    s3_client = boto3.client("s3")
+    new_file_name = f"{uuid.uuid4()}{path.suffix}"
+
+    # try:
+    s3_client.upload_file(str(path), UPLOAD_S3_BUCKET, new_file_name)
+    # except Exception as exc:
+        # return f"Cannot upload file for OCR: {exc}"
+    
+    # try:
+    bucket_name = DOWNLOAD_S3_BUCKET
+    file_name = f"{new_file_name}.txt"
+    s3_client = boto3.client("s3")
+
+    # Long polling to wait for the OCR result
+    timeout = 600  # 10 minutes timeout
+    poll_interval = 10  # seconds
+    elapsed_time = 0
+
+    while elapsed_time < timeout:
+        try:
+            obj = s3_client.get_object(Bucket=bucket_name, Key=file_name)
+            ocr_text = obj["Body"].read().decode("utf-8")
+            return ocr_text
+        except s3_client.exceptions.NoSuchKey:
+            time.sleep(poll_interval)
+            elapsed_time += poll_interval
+
+    raise TimeoutError("OCR result not available within the timeout period.")
+    # except Exception as exc:
+    #     return f"Error during OCR processing: {exc}"
 
 
 def extract_file_context(path: Path) -> Tuple[str, str]:
