@@ -1,0 +1,7 @@
+langchain-aws
+boto3
+langchain 
+langchain_community
+sentence-transformers
+PyMuPDF
+
