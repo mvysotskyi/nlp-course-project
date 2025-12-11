@@ -2,6 +2,8 @@ import re
 import os
 import uuid
 import time
+import threading
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -97,9 +99,9 @@ def read_docx(path: Path) -> Tuple[str, str]:
         return "", f"не вдалося обробити DOCX: {exc}"
 
 
-def placeholder_ocr(path: Path) -> str:
+def process_ocr(path: Path) -> str:
     s3_client = boto3.client("s3")
-    new_file_name = f"{uuid.uuid4()}{path.suffix}"
+    new_file_name = f"{uuid.uuid4()}"
 
     # try:
     s3_client.upload_file(str(path), UPLOAD_S3_BUCKET, new_file_name)
@@ -113,13 +115,15 @@ def placeholder_ocr(path: Path) -> str:
 
     # Long polling to wait for the OCR result
     timeout = 600  # 10 minutes timeout
-    poll_interval = 10  # seconds
+    poll_interval = 15  # seconds
     elapsed_time = 0
 
     while elapsed_time < timeout:
         try:
-            obj = s3_client.get_object(Bucket=bucket_name, Key=file_name)
+            obj = s3_client.get_object(Bucket=bucket_name, Key="results/" + file_name)
             ocr_text = obj["Body"].read().decode("utf-8")
+
+            print(ocr_text)
             return ocr_text
         except s3_client.exceptions.NoSuchKey:
             time.sleep(poll_interval)
@@ -128,6 +132,30 @@ def placeholder_ocr(path: Path) -> str:
     raise TimeoutError("OCR result not available within the timeout period.")
     # except Exception as exc:
     #     return f"Error during OCR processing: {exc}"
+
+
+# =========================
+# Async OCR runner
+# =========================
+
+def start_async_ocr(path: Path, state: dict):
+    """Run OCR in background without blocking Streamlit."""
+    def worker():
+        try:
+            text = process_ocr(path)
+            state["ocr_result"] = text
+            state["ocr_status"] = "done"
+        except Exception as exc:
+            state["ocr_result"] = f"OCR failed: {exc}"
+            state["ocr_status"] = "failed"
+
+    # Reset before start
+    state["ocr_status"] = "running"
+    state["ocr_result"] = ""
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
 
 
 def extract_file_context(path: Path) -> Tuple[str, str]:
@@ -242,7 +270,7 @@ def process_ocr_files(
             summary_lines.append(f"**{path.name}** — формат не підтримується для OCR.")
             continue
 
-        text = placeholder_ocr(path)
+        text = process_ocr(path)
         extracted_sections.append(f"Джерело: {path.name}\n{text}")
         summary_lines.append(f"**{path.name}** — OCR чернетка ({readable_size(path)})")
         processed_files += 1
@@ -505,23 +533,27 @@ def main():
         if st.button("Запустити OCR (демо)"):
             if ocr_files:
                 ocr_paths = save_uploaded_files(ocr_files, subdir="ocr")
-                state, ctx_display, status, ocr_text = process_ocr_files(
-                    ocr_paths, st.session_state.app_state
-                )
+                ocr_path = Path(ocr_paths[0])  # take first file, same as your logic
+                start_async_ocr(ocr_path, st.session_state.app_state)
+                st.session_state.status_msg = f"OCR запущено для {ocr_path.name}"
             else:
-                state, ctx_display, status, ocr_text = process_ocr_files(
-                    [], st.session_state.app_state
+                st.session_state.status_msg = "Немає файлів для OCR"
+
+
+                st.markdown(
+                    "_Цей OCR блок поки що використовує демо-функцію. Після інтеграції з реальним сервісом тут "
+                    "відобразиться розпізнаний текст._"
                 )
 
-            st.session_state.app_state = state
-            st.session_state.context_display = ctx_display
-            st.session_state.status_msg = status
-            st.session_state.ocr_preview_text = ocr_text
+        # Auto-refresh while OCR runs
+        if st.session_state.app_state.get("ocr_status") == "running":
+            st.info("OCR виконується… будь ласка, зачекайте.")
+            st.rerun()
+        elif st.session_state.app_state.get("ocr_status") == "done":
+            st.success("OCR завершено!")
+        elif st.session_state.app_state.get("ocr_status") == "failed":
+            st.error(st.session_state.app_state.get("ocr_result"))
 
-        st.markdown(
-            "_Цей OCR блок поки що використовує демо-функцію. Після інтеграції з реальним сервісом тут "
-            "відобразиться розпізнаний текст._"
-        )
 
     # Main columns: left → context, right → chat
     col_ctx, col_chat = st.columns([1, 2])
@@ -537,12 +569,14 @@ def main():
         st.markdown(st.session_state.context_display)
 
         st.subheader("Чернетка тексту після OCR")
+        
+        st.session_state.ocr_preview_text_box = st.session_state.app_state.get("ocr_result", "")
         st.text_area(
             "OCR текст",
-            value=st.session_state.ocr_preview_text,
             height=200,
             key="ocr_preview_text_box",
         )
+
 
     with col_chat:
         st.subheader("Розмова з Юридичним помічником")
