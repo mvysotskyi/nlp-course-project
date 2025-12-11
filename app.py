@@ -12,12 +12,11 @@ import streamlit as st
 import markdown as md 
 from openai import OpenAI
 
+from pypdf import PdfReader
 import boto3
 
-# =========================
-# Configuration constants
-# =========================
 
+# Configuration constants
 DEFAULT_BASE_URL = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
 DEFAULT_MODEL = "openai.gpt-oss-120b-1:0"
 MAX_CONTEXT_CHARS = 12000
@@ -31,9 +30,6 @@ UPLOAD_S3_BUCKET = os.getenv("UPLOAD_S3_BUCKET", "legal-ocr-input")
 DOWNLOAD_S3_BUCKET = os.getenv("DOWNLOAD_S3_BUCKET", "legal-ocr-output")
 
 
-# =========================
-# Backend helpers (unchanged logic)
-# =========================
 
 def readable_size(path: Path) -> str:
     size_kb = path.stat().st_size / 1024
@@ -42,7 +38,6 @@ def readable_size(path: Path) -> str:
 
 @lru_cache(maxsize=1)
 def get_client() -> OpenAI:
-    """Create a cached OpenAI client configured for the Legal Helper app."""
     api_key = os.getenv("BEDROCK_KEY")
     if not api_key:
         raise RuntimeError(
@@ -53,7 +48,6 @@ def get_client() -> OpenAI:
 
 
 def read_text_file(path: Path) -> Tuple[str, str]:
-    """Read UTF-8-ish text files with graceful fallback."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
         return text, f"текст витягнуто ({readable_size(path)})"
@@ -62,14 +56,6 @@ def read_text_file(path: Path) -> Tuple[str, str]:
 
 
 def read_pdf(path: Path) -> Tuple[str, str]:
-    """Extract text from PDFs when pypdf is available."""
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return "", (
-            f"PDF завантажено ({readable_size(path)}); встановіть 'pypdf', щоб автоматично витягувати текст."
-        )
-
     try:
         reader = PdfReader(str(path))
         pages = [page.extract_text() or "" for page in reader.pages]
@@ -103,43 +89,36 @@ def process_ocr(path: Path) -> str:
     s3_client = boto3.client("s3")
     new_file_name = f"{uuid.uuid4()}"
 
-    # try:
     s3_client.upload_file(str(path), UPLOAD_S3_BUCKET, new_file_name)
-    # except Exception as exc:
-        # return f"Cannot upload file for OCR: {exc}"
-    
-    # try:
+
     bucket_name = DOWNLOAD_S3_BUCKET
     file_name = f"{new_file_name}.txt"
     s3_client = boto3.client("s3")
 
     # Long polling to wait for the OCR result
-    timeout = 600  # 10 minutes timeout
-    poll_interval = 15  # seconds
+    timeout = 600
+    poll_interval = 15
     elapsed_time = 0
 
-    while elapsed_time < timeout:
-        try:
-            obj = s3_client.get_object(Bucket=bucket_name, Key="results/" + file_name)
-            ocr_text = obj["Body"].read().decode("utf-8")
+    try:
+        while elapsed_time < timeout:
+            try:
+                obj = s3_client.get_object(Bucket=bucket_name, Key="results/" + file_name)
+                ocr_text = obj["Body"].read().decode("utf-8")
 
-            print(ocr_text)
-            return ocr_text
-        except s3_client.exceptions.NoSuchKey:
-            time.sleep(poll_interval)
-            elapsed_time += poll_interval
+                print(ocr_text)
+                return ocr_text
+            except s3_client.exceptions.NoSuchKey:
+                time.sleep(poll_interval)
+                elapsed_time += poll_interval
 
-    raise TimeoutError("OCR result not available within the timeout period.")
-    # except Exception as exc:
-    #     return f"Error during OCR processing: {exc}"
+        raise TimeoutError("OCR result not available within the timeout period.")
+    except Exception as exc:
+        return f"Error during OCR processing: {exc}"
 
 
-# =========================
 # Async OCR runner
-# =========================
-
 def start_async_ocr(path: Path, state: dict):
-    """Run OCR in background without blocking Streamlit."""
     def worker():
         try:
             text = process_ocr(path)
@@ -149,7 +128,6 @@ def start_async_ocr(path: Path, state: dict):
             state["ocr_result"] = f"OCR failed: {exc}"
             state["ocr_status"] = "failed"
 
-    # Reset before start
     state["ocr_status"] = "running"
     state["ocr_result"] = ""
 
@@ -159,7 +137,6 @@ def start_async_ocr(path: Path, state: dict):
 
 
 def extract_file_context(path: Path) -> Tuple[str, str]:
-    """Return extracted text (if any) and a human-friendly summary."""
     suffix = path.suffix.lower()
     if suffix in TEXT_EXTENSIONS:
         return read_text_file(path)
@@ -175,13 +152,11 @@ def extract_file_context(path: Path) -> Tuple[str, str]:
 
 
 def merge_contexts(state: dict) -> str:
-    """Combine file and OCR contexts into a single string."""
     parts = [state.get("base_context", ""), state.get("ocr_context", "")]
     return "\n\n".join(part for part in parts if part).strip()
 
 
 def compose_context_display(state: dict) -> str:
-    """Render a combined Markdown summary for all context sources."""
     sections = [state.get("file_summary_md", ""), state.get("ocr_summary_md", "")]
     sections = [s for s in sections if s and s.strip()]
     return "\n\n".join(sections) if sections else "Контекст ще не завантажено."
@@ -190,7 +165,6 @@ def compose_context_display(state: dict) -> str:
 def summarize_context(
     sections: List[str], summaries: List[str], title: str = "### Завантажений контекст"
 ) -> Tuple[str, str]:
-    """Combine extracted text and create a Markdown-friendly summary."""
     combined_context = "\n\n".join(sections).strip()
     if len(combined_context) > MAX_CONTEXT_CHARS:
         combined_context = combined_context[:MAX_CONTEXT_CHARS] + "\n...[контекст урізано]"
@@ -203,7 +177,6 @@ def summarize_context(
 def process_files(
     uploaded_files: Optional[List[str]], state: Optional[dict]
 ) -> Tuple[dict, str, str]:
-    """Handle file uploads, extract available text, and update session state."""
     state = state or {"context": "", "history": [], "files": [], "ocr_files": []}
     if not uploaded_files:
         state.update({"context": "", "files": [], "base_context": "", "file_summary_md": ""})
@@ -244,7 +217,6 @@ def process_files(
 def process_ocr_files(
     uploaded_files: Optional[List[str]], state: Optional[dict]
 ) -> Tuple[dict, str, str, str]:
-    """Simulate OCR text extraction and add it to the shared context."""
     state = state or {
         "context": "",
         "history": [],
@@ -295,7 +267,6 @@ def process_ocr_files(
 
 
 def build_messages(state: dict, user_message: str) -> List[dict]:
-    """Prepare the message list for the OpenAI chat completion call."""
     system_prompt = (
         "You are Legal Helper, a virtual legal research assistant. "
         "Provide general insights, outline options, and suggest next steps, "
@@ -326,7 +297,6 @@ def build_messages(state: dict, user_message: str) -> List[dict]:
 
 
 def fetch_completion(messages: List[dict]) -> str:
-    """Request a response from the configured LLM."""
     client = get_client()
     model_name = os.getenv("LEGAL_HELPER_MODEL", DEFAULT_MODEL)
     completion = client.chat.completions.create(
@@ -363,19 +333,18 @@ def initial_state() -> dict:
 
 
 def generate_response(user_message: str, state: Optional[dict]) -> Tuple[dict, str]:
-    """Send the user's prompt to the LLM and return the updated conversation state + status."""
     user_message = (user_message or "").strip()
     if not user_message:
         return state or initial_state(), "Введіть запитання."
 
     state = state or initial_state()
     state_history = state.get("history", [])
-    state_history.append((user_message, ""))  # placeholder for assistant
+    state_history.append((user_message, ""))
 
     try:
         messages = build_messages(state, user_message)
         assistant_response = fetch_completion(messages)
-    except Exception as exc:  # pragma: no cover - network failure path
+    except Exception as exc:
         state_history[-1] = (user_message, "⚠️ Не вдалося підключитися до мовної моделі.")
         state["history"] = state_history
         return state, f"Помилка виклику моделі: {exc}"
@@ -386,20 +355,13 @@ def generate_response(user_message: str, state: Optional[dict]) -> Tuple[dict, s
 
 
 def clear_conversation() -> Tuple[dict, str, str]:
-    """Reset conversation history and uploaded context."""
     cleared_state = initial_state()
     return cleared_state, "Розмову очищено.", "Контекст ще не завантажено."
 
 
-# =========================
-# Streamlit UI
-# =========================
 
+# Streamlit UI
 def save_uploaded_files(uploaded_files: List[Any], subdir: str) -> List[str]:
-    """
-    Save Streamlit UploadedFile objects to disk and return a list of file paths.
-    subdir: 'base' or 'ocr' just to separate folders.
-    """
     if not uploaded_files:
         return []
 
@@ -408,7 +370,6 @@ def save_uploaded_files(uploaded_files: List[Any], subdir: str) -> List[str]:
 
     saved_paths: List[str] = []
     for f in uploaded_files:
-        # f is a streamlit.runtime.uploaded_file_manager.UploadedFile
         path = target_dir / f.name
         # Overwrite if exists (fine for this use case)
         path.write_bytes(f.read())
@@ -416,27 +377,17 @@ def save_uploaded_files(uploaded_files: List[Any], subdir: str) -> List[str]:
     return saved_paths
 
 
-from typing import Optional  # if not already imported at top
-
-
 def build_chat_html(
     history_pairs: List[Tuple[str, Optional[str]]],
     chat_height: int = 600,
 ) -> str:
-    """
-    Build full HTML (outer scrollable div + message bubbles) from
-    a list of (user_text, assistant_text_or_None) pairs.
-    Renders Markdown inside the bubbles and aligns user right / assistant left.
-    """
     chat_history_html = ""
 
     for user_text, assistant_text in history_pairs:
-        # Markdown → HTML (no escaping so formatting works)
         u_html = md.markdown(user_text or "") if user_text else ""
         a_html = md.markdown(assistant_text or "") if assistant_text else ""
 
         if user_text:
-            # USER bubble – right-aligned
             chat_history_html += (
                 '<div style="display:flex; justify-content:flex-end; '
                 'margin-bottom:0.75rem;">'
@@ -455,7 +406,6 @@ def build_chat_html(
             )
 
         if assistant_text:
-            # ASSISTANT bubble – left-aligned
             chat_history_html += (
                 '<div style="display:flex; justify-content:flex-start; '
                 'margin-bottom:0.75rem;">'
@@ -491,7 +441,6 @@ def build_chat_html(
 def main():
     st.set_page_config(page_title="Юридичний помічник", layout="wide")
 
-    # Session state bootstrapping
     if "app_state" not in st.session_state:
         st.session_state.app_state = initial_state()
     if "status_msg" not in st.session_state:
@@ -501,7 +450,6 @@ def main():
     if "ocr_preview_text" not in st.session_state:
         st.session_state.ocr_preview_text = ""
 
-    # Layout: sidebar for files / OCR, main area for context + chat
     with st.sidebar:
         st.header("Документи")
 
@@ -555,7 +503,6 @@ def main():
             st.error(st.session_state.app_state.get("ocr_result"))
 
 
-    # Main columns: left → context, right → chat
     col_ctx, col_chat = st.columns([1, 2])
 
     with col_ctx:
@@ -581,7 +528,6 @@ def main():
     with col_chat:
         st.subheader("Розмова з Юридичним помічником")
 
-        # Clear conversation button
         if st.button("Очистити розмову"):
             new_state, status, ctx_display = clear_conversation()
             st.session_state.app_state = new_state
@@ -590,46 +536,32 @@ def main():
             st.session_state.ocr_preview_text = ""
             st.rerun()
 
-        # Container where chat will be rendered (scrollable box)
         chat_container = st.container()
-
-        # Chat input – visually appears BELOW the container
         user_message = st.chat_input("Опишіть свою ситуацію або запитання...")
 
         with chat_container:
-            chat_height = 600  # adjust if you want
-
-            # Current history from state
+            chat_height = 600
             history = st.session_state.app_state.get("history", [])
-
-            # Placeholder we can update twice: (1) pending view, (2) final view
             chat_placeholder = st.empty()
 
-            # ---------- 1) Show pending bubble immediately ----------
 
             if user_message:
-                # History + new user message, assistant not yet answered
                 pending_pairs: List[Tuple[str, Optional[str]]] = history + [
                     (user_message, None)
                 ]
                 pending_html = build_chat_html(pending_pairs, chat_height=chat_height)
                 chat_placeholder.markdown(pending_html, unsafe_allow_html=True)
             else:
-                # No new message → just render normal history
                 current_html = build_chat_html(
                     [(u, a) for (u, a) in history], chat_height=chat_height
                 )
                 chat_placeholder.markdown(current_html, unsafe_allow_html=True)
 
-            # ---------- 2) If there is a new message, call LLM and update chat ----------
-
             if user_message:
-                # Call your existing backend logic to get a response
                 state, status = generate_response(user_message, st.session_state.app_state)
                 st.session_state.app_state = state
                 st.session_state.status_msg = status
 
-                # Now render final history including assistant reply
                 final_history = st.session_state.app_state.get("history", [])
                 final_html = build_chat_html(
                     [(u, a) for (u, a) in final_history], chat_height=chat_height
@@ -637,8 +569,6 @@ def main():
                 chat_placeholder.markdown(final_html, unsafe_allow_html=True)
 
 
-
-    # Status line at the bottom
     if st.session_state.status_msg:
         st.info(st.session_state.status_msg)
 
