@@ -51,7 +51,7 @@ print("Embedding model loaded.")
 
 # --- 4. Read and Split PDF ---
 pdf_reader = PDFReader()
-document = pdf_reader.read_pdf("docs/codecs_ukr.pdf")
+document = pdf_reader.read_pdf("../docs/codecs_ukr.pdf")
 
 # Split by "Стаття" to get individual articles
 print("Splitting document by 'Стаття' (articles)...")
