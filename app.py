@@ -14,11 +14,14 @@ from openai import OpenAI
 
 from pypdf import PdfReader
 import boto3
+import torch
+from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
 
 
 # Configuration constants
 DEFAULT_BASE_URL = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
 DEFAULT_MODEL = "openai.gpt-oss-120b-1:0"
+DEFAULT_NER_MODEL = "nazar0202/xlm-roberta-base-ner"
 MAX_CONTEXT_CHARS = 12000
 MAX_PER_FILE_CHARS = 4000
 TEXT_EXTENSIONS = {".txt", ".md"}
@@ -45,6 +48,56 @@ def get_client() -> OpenAI:
         )
     base_url = os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL)
     return OpenAI(base_url=base_url, api_key=api_key)
+
+
+@lru_cache(maxsize=1)
+def get_ner_pipeline():
+    """Load and cache the NER pipeline for anonymization."""
+    model_name = os.getenv("NER_MODEL_NAME", DEFAULT_NER_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, subfolder="checkpoint-160")
+    model = AutoModelForTokenClassification.from_pretrained(model_name, subfolder="checkpoint-160")
+    device = "cuda" if torch.cuda.is_available() else -1
+    return pipeline(
+        "token-classification",
+        model=model,
+        tokenizer=tokenizer,
+        aggregation_strategy="simple",
+        device=device,
+    )
+
+
+def anonymize_text(text: str) -> Tuple[str, List[str]]:
+    """Replace detected entities with their labels, returning the new text and stats."""
+    if not text.strip():
+        return "", []
+
+    ner = get_ner_pipeline()
+    print("Running NER for anonymization...")
+    predictions = ner(text)
+
+    print(f"NER predictions: {predictions}")
+    if not predictions:
+        return text, []
+
+    # Sort by start index to rebuild text in order
+    predictions = sorted(predictions, key=lambda p: p["start"])
+    result_parts: List[str] = []
+    last_idx = 0
+    counts: dict[str, int] = {}
+
+    for pred in predictions:
+        start, end = int(pred["start"]), int(pred["end"])
+        label = (pred.get("entity_group") or pred.get("entity") or "ENT").upper()
+        result_parts.append(text[last_idx:start])
+        result_parts.append(f"[{label}]")
+        last_idx = end
+        counts[label] = counts.get(label, 0) + 1
+
+    result_parts.append(text[last_idx:])
+    anonymized = "".join(result_parts)
+
+    stats = [f"{label}: {count}" for label, count in sorted(counts.items())]
+    return anonymized, stats
 
 
 def read_text_file(path: Path) -> Tuple[str, str]:
@@ -85,7 +138,7 @@ def read_docx(path: Path) -> Tuple[str, str]:
         return "", f"не вдалося обробити DOCX: {exc}"
 
 
-def process_ocr(path: Path) -> str:
+def process_ocr(path: Path) -> Tuple[str, List[str]]:
     s3_client = boto3.client("s3")
     new_file_name = f"{uuid.uuid4()}"
 
@@ -107,26 +160,32 @@ def process_ocr(path: Path) -> str:
                 ocr_text = obj["Body"].read().decode("utf-8")
 
                 print(ocr_text)
-                return ocr_text
+                print("OCR text retrieved, starting anonymization...")
+
+                anonymized_text, stats = anonymize_text(ocr_text)
+                print(anonymized_text)
+                return anonymized_text, stats
             except s3_client.exceptions.NoSuchKey:
                 time.sleep(poll_interval)
                 elapsed_time += poll_interval
 
         raise TimeoutError("OCR result not available within the timeout period.")
     except Exception as exc:
-        return f"Error during OCR processing: {exc}"
+        return f"Error during OCR processing: {exc}", []
 
 
 # Async OCR runner
 def start_async_ocr(path: Path, state: dict):
     def worker():
         try:
-            text = process_ocr(path)
+            text, stats = process_ocr(path)
             state["ocr_result"] = text
+            state["ocr_anon_stats"] = stats
             state["ocr_status"] = "done"
         except Exception as exc:
             state["ocr_result"] = f"OCR failed: {exc}"
             state["ocr_status"] = "failed"
+            state["ocr_anon_stats"] = []
 
     state["ocr_status"] = "running"
     state["ocr_result"] = ""
@@ -177,24 +236,46 @@ def summarize_context(
 def process_files(
     uploaded_files: Optional[List[str]], state: Optional[dict]
 ) -> Tuple[dict, str, str]:
-    state = state or {"context": "", "history": [], "files": [], "ocr_files": []}
+    state = state or {
+        "context": "",
+        "history": [],
+        "files": [],
+        "ocr_files": [],
+        "ocr_anon_stats": [],
+        "base_anon_stats": [],
+    }
     if not uploaded_files:
-        state.update({"context": "", "files": [], "base_context": "", "file_summary_md": ""})
+        state.update(
+            {
+                "context": "",
+                "files": [],
+                "base_context": "",
+                "file_summary_md": "",
+                "base_anon_stats": [],
+            }
+        )
         state["context"] = merge_contexts(state)
         context_md = compose_context_display(state)
         return state, context_md, "Контекст очищено."
 
     extracted_sections: List[str] = []
     summary_lines: List[str] = []
+    anonymization_summaries: List[str] = []
     for file_path in uploaded_files:
         path = Path(file_path)
         text, summary = extract_file_context(path)
         if text:
-            snippet = text[:MAX_PER_FILE_CHARS]
-            if len(text) > MAX_PER_FILE_CHARS:
+            anonymized_text, stats = anonymize_text(text)
+            snippet = anonymized_text[:MAX_PER_FILE_CHARS]
+            if len(anonymized_text) > MAX_PER_FILE_CHARS:
                 snippet += "\n...[урізано]"
             extracted_sections.append(f"Джерело: {path.name}\n{snippet}")
-        summary_lines.append(f"**{path.name}** — {summary}")
+            if stats:
+                anonymization_summaries.append(f"{path.name}: {', '.join(stats)}")
+            stats_note = f" | анонімізація: {', '.join(stats)}" if stats else ""
+        else:
+            stats_note = ""
+        summary_lines.append(f"**{path.name}** — {summary}{stats_note}")
 
     combined_context, context_md = summarize_context(
         extracted_sections, summary_lines, title="### OCR контекст"
@@ -205,6 +286,7 @@ def process_files(
             "context": merge_contexts(state),
             "files": [Path(p).name for p in uploaded_files],
             "file_summary_md": context_md,
+            "base_anon_stats": anonymization_summaries,
         }
     )
     file_count = len(uploaded_files)
@@ -223,10 +305,12 @@ def process_ocr_files(
         "files": [],
         "ocr_files": [],
         "base_context": "",
+        "ocr_anon_stats": [],
+        "base_anon_stats": [],
     }
 
     if not uploaded_files:
-        state.update({"ocr_context": "", "ocr_files": [], "ocr_summary_md": ""})
+        state.update({"ocr_context": "", "ocr_files": [], "ocr_summary_md": "", "ocr_anon_stats": []})
         state["context"] = merge_contexts(state)
         context_md = compose_context_display(state)
         return state, context_md, "OCR контекст очищено.", ""
@@ -234,6 +318,7 @@ def process_ocr_files(
     extracted_sections: List[str] = []
     summary_lines: List[str] = []
     processed_files = 0
+    anonymization_summaries: List[str] = []
 
     for file_path in uploaded_files:
         path = Path(file_path)
@@ -242,9 +327,12 @@ def process_ocr_files(
             summary_lines.append(f"**{path.name}** — формат не підтримується для OCR.")
             continue
 
-        text = process_ocr(path)
+        text, stats = process_ocr(path)
         extracted_sections.append(f"Джерело: {path.name}\n{text}")
-        summary_lines.append(f"**{path.name}** — OCR чернетка ({readable_size(path)})")
+        stats_note = f" | анонімізація: {', '.join(stats)}" if stats else ""
+        summary_lines.append(f"**{path.name}** — OCR чернетка ({readable_size(path)}){stats_note}")
+        if stats:
+            anonymization_summaries.append(f"{path.name}: {', '.join(stats)}")
         processed_files += 1
 
     combined_context, context_md = summarize_context(extracted_sections, summary_lines)
@@ -254,6 +342,7 @@ def process_ocr_files(
             "ocr_files": [Path(p).name for p in uploaded_files],
             "ocr_summary_md": context_md,
             "context": merge_contexts(state),
+            "ocr_anon_stats": anonymization_summaries,
         }
     )
 
@@ -329,6 +418,8 @@ def initial_state() -> dict:
         "base_context": "",
         "file_summary_md": "",
         "ocr_summary_md": "",
+        "ocr_anon_stats": [],
+        "base_anon_stats": [],
     }
 
 
@@ -514,6 +605,9 @@ def main():
 
         st.subheader("Поточний контекст")
         st.markdown(st.session_state.context_display)
+        base_anon_stats = st.session_state.app_state.get("base_anon_stats") or []
+        if base_anon_stats:
+            st.markdown("**Анонімізація файлів (NER):** " + "; ".join(base_anon_stats))
 
         st.subheader("Чернетка тексту після OCR")
         
@@ -523,6 +617,9 @@ def main():
             height=200,
             key="ocr_preview_text_box",
         )
+        anon_stats = st.session_state.app_state.get("ocr_anon_stats") or []
+        if anon_stats:
+            st.markdown("**Анонімізація (NER):** " + "; ".join(anon_stats))
 
 
     with col_chat:
