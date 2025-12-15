@@ -211,10 +211,7 @@ def extract_file_context(path: Path) -> Tuple[str, str]:
         return read_pdf(path)
     if suffix == ".docx":
         return read_docx(path)
-    if suffix in IMAGE_EXTENSIONS:
-        return "", (
-            f"зображення завантажено ({readable_size(path)}); додайте підказку з описом його вмісту."
-        )
+
     return "", f"{suffix or 'файл'} завантажено ({readable_size(path)}); витягнення не підтримується."
 
 
