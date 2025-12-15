@@ -16,3 +16,9 @@ services:
       ENABLE_MODULES: ''
       PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
       CLUSTER_HOSTNAME: 'node1'
+    networks:
+      - weaviate_net
+
+networks:
+  weaviate_net:
+    driver: bridge

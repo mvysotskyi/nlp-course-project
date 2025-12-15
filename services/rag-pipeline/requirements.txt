@@ -2,6 +2,10 @@ langchain-aws
 boto3
 langchain 
 langchain_community
+langchain-cohere
+cohere
 sentence-transformers
 PyMuPDF
 
+streamlit
+python-dotenv
