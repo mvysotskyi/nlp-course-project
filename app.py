@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 import uuid
 import time
 import threading
@@ -49,10 +50,17 @@ def get_client() -> OpenAI:
     base_url = os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL)
     return OpenAI(base_url=base_url, api_key=api_key)
 
+@lru_cache(maxsize=1)
+def get_rag_assistant():
+    rag_dir = Path(__file__).parent / "services" / "rag-pipeline"
+    if str(rag_dir) not in sys.path:
+        sys.path.append(str(rag_dir))
+    from final_assistant import FinalLegalAssistantRAG  # type: ignore
+    return FinalLegalAssistantRAG()
+
 
 @lru_cache(maxsize=1)
 def get_ner_pipeline():
-    """Load and cache the NER pipeline for anonymization."""
     model_name = os.getenv("NER_MODEL_NAME", DEFAULT_NER_MODEL)
     tokenizer = AutoTokenizer.from_pretrained(model_name, subfolder="checkpoint-160")
     model = AutoModelForTokenClassification.from_pretrained(model_name, subfolder="checkpoint-160")
@@ -420,6 +428,7 @@ def initial_state() -> dict:
         "ocr_summary_md": "",
         "ocr_anon_stats": [],
         "base_anon_stats": [],
+        "use_rag": False,
     }
 
 
@@ -433,8 +442,16 @@ def generate_response(user_message: str, state: Optional[dict]) -> Tuple[dict, s
     state_history.append((user_message, ""))
 
     try:
-        messages = build_messages(state, user_message)
-        assistant_response = fetch_completion(messages)
+        use_rag = (state or {}).get("use_rag")
+        if use_rag:
+            rag_query = user_message
+            if state.get("context"):
+                rag_query = f"{user_message}\n\nДодатковий контекст користувача:\n{state['context']}"
+            assistant = get_rag_assistant()
+            assistant_response = assistant.run_pipeline(rag_query)
+        else:
+            messages = build_messages(state, user_message)
+            assistant_response = fetch_completion(messages)
     except Exception as exc:
         state_history[-1] = (user_message, "⚠️ Не вдалося підключитися до мовної моделі.")
         state["history"] = state_history
@@ -632,6 +649,13 @@ def main():
             st.session_state.context_display = ctx_display
             st.session_state.ocr_preview_text = ""
             st.rerun()
+
+        use_rag_toggle = st.checkbox(
+            "Використовувати RAG (ККУ + судова практика)",
+            value=st.session_state.app_state.get("use_rag", False),
+            help="Увімкніть, щоб відповідати на основі бази знань RAG про ККУ та рішення ВС.",
+        )
+        st.session_state.app_state["use_rag"] = use_rag_toggle
 
         chat_container = st.container()
         user_message = st.chat_input("Опишіть свою ситуацію або запитання...")
