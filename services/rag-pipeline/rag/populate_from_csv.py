@@ -21,9 +21,6 @@ except Exception as e:
     print(f"Error connecting to Weaviate: {e}")
     exit(1)
 
-# --- 2. Define Weaviate Schema ---
-# We want to embed 'summary' for vector search.
-# We want 'text', 'analysis', 'case_number', etc. for full-text search (BM25).
 
 if client.collections.exists(CLASS_NAME):
     print(f"Class '{CLASS_NAME}' already exists. Deleting to repopulate...")
@@ -95,7 +92,6 @@ with open(CSV_FILE, 'r', encoding='utf-8') as f:
     count = 0
     
     for row in reader:
-        # Skip rows with empty summary if necessary, or handle them
         if not row.get('summary'):
             continue
             
@@ -106,10 +102,8 @@ with open(CSV_FILE, 'r', encoding='utf-8') as f:
             count += len(current_batch)
             print(f"Processed {count} records...")
             current_batch = []
-            # Optional: sleep to avoid rate limits if needed
-            # time.sleep(0.5) 
 
-    # Process remaining
+
     if current_batch:
         process_batch(current_batch)
         count += len(current_batch)

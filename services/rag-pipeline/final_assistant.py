@@ -20,7 +20,7 @@ class FinalLegalAssistantRAG:
         AWS_REGION = "us-east-1"
 
         # --- 1. Connect to Local Weaviate ---
-        client = weaviate.connect_to_local(grpc_port=50051)
+        self.client = weaviate.connect_to_local(grpc_port=50051)
 
         # --- 2. Initialize Embedding Model ---
         print("Loading Cohere embedding model on AWS Bedrock...")
@@ -33,14 +33,14 @@ class FinalLegalAssistantRAG:
 
         # --- 3. Connect to Vector Stores ---
         self.codecs_store = WeaviateVectorStore(
-            client=client,
+            client=self.client,
             index_name=CODECS_CLASS_NAME,
             embedding=embeddings,
             text_key="text"
         )
 
         self.court_store = WeaviateVectorStore(
-            client=client,
+            client=self.client,
             index_name=COURT_CLASS_NAME,
             embedding=embeddings,
             text_key="summary",
@@ -91,8 +91,6 @@ class FinalLegalAssistantRAG:
         else:
             return self.court_store.as_retriever(search_kwargs={"k": 5})
 
-   
-
     def format_docs(self, docs):
         formatted = []
         for d in docs:
@@ -117,20 +115,30 @@ class FinalLegalAssistantRAG:
         #print(f"Router returned: {route_data}")
 
         route_data = json.loads(route_data)
-        #print(f"Parsed router data: {route_data}")
-        source = route_data.get("source") # Default to codecs if unsure
+        source = route_data.get("source") 
         queries = route_data.get("queries")
-        #print(source, queries)
-            
-        # except:
-        #     print(f"Router failed to return JSON. Response: {route_response}")
-        #     source = "codecs" # Fallback
-            
-        #print(f"Routing to: {source}")
+
         
         # 2. Retrieve
         retriever = self.get_retriever(source)
-        docs = retriever.invoke(query)
+        docs = []
+        if queries:
+            for q in queries:
+                docs.append(retriever.invoke(q))
+        
+        docs_final = []
+        for i in range(3):
+            for doc_list in docs:
+                docs_final.append(doc_list[i])
+        docs = docs_final
+
+        # Deduplicate docs
+        unique_docs = {}
+        for doc in docs:
+            if doc.page_content not in unique_docs:
+                unique_docs[doc.page_content] = doc
+        docs = list(unique_docs.values())[:3]
+
         context = self.format_docs(docs)
         
         # 3. Generate
@@ -142,8 +150,7 @@ class FinalLegalAssistantRAG:
         return final_response
     
     def close(self):
-        self.codecs_store.client.close()
-        self.court_store.client.close()
+        self.client.close()
 
 if __name__ == "__main__":
     assistant = FinalLegalAssistantRAG()

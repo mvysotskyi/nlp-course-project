@@ -13,7 +13,7 @@ dotenv.load_dotenv()
 # --- Configuration ---
 CSV_FILE = '2024-5K-supreme-court-decisions-analyzed.csv'
 CLASS_NAME = "SupremeCourtDecisionFullText"
-BATCH_SIZE = 50  # This will be number of chunks now
+BATCH_SIZE = 50 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 

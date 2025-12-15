@@ -117,26 +117,9 @@ def generate_eval_data_codecs(pdf_path, output_path, num_samples=20):
     print(f"Saved {len(eval_data)} evaluation pairs to {output_path}")
 
 if __name__ == "__main__":
-    # Path to PDF relative to this script
     pdf_path = os.path.join(os.path.dirname(__file__), 'rag/docs/codecs_ukr.pdf')
-    # Check if file exists there, otherwise try direct path
-    if not os.path.exists(pdf_path):
-        pdf_path = 'docs/codecs_ukr.pdf' # Try relative to workspace root if running from there?
-        # Actually, let's just use the absolute path or relative to services/rag-pipeline
-        pdf_path = 'rag/docs/codecs_ukr.pdf'
-        
-    # The user said "docs folder codecs_ukr.pdf". 
-    # In workspace info: services/rag-pipeline/docs/codecs_ukr.pdf
-    # But populate_rag_aws.py uses "docs/codecs_ukr.pdf" relative to services/rag-pipeline/rag/ ? No, likely relative to CWD.
-    # Let's assume we run this from services/rag-pipeline/
-    
+
     pdf_path = 'docs/codecs_ukr.pdf'
-    if not os.path.exists(pdf_path):
-         # Try finding it
-         if os.path.exists('rag/docs/codecs_ukr.pdf'):
-             pdf_path = 'rag/docs/codecs_ukr.pdf'
-         elif os.path.exists('../docs/codecs_ukr.pdf'):
-             pdf_path = '../docs/codecs_ukr.pdf'
     
     generate_eval_data_codecs(
         pdf_path=pdf_path,

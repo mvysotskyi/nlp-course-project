@@ -6,6 +6,5 @@ langchain-cohere
 cohere
 sentence-transformers
 PyMuPDF
-
 streamlit
 python-dotenv

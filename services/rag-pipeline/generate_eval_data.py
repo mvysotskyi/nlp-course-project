@@ -16,7 +16,7 @@ def generate_eval_data(csv_path, output_path, num_samples=20):
     
     llm = ChatBedrock(
         model_id="openai.gpt-oss-120b-1:0",
-        model_kwargs={"temperature": 0.7}, # Higher temp for generation
+        model_kwargs={"temperature": 0.4}, 
         region_name="us-east-1",
         aws_access_key_id=os.getenv("aws_key_id"),
         aws_secret_access_key=os.getenv("aws_secret_key")
